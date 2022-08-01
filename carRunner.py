@@ -1,17 +1,34 @@
 
-from tabnanny import verbose
+from ast import arg
+from operator import mod
 from time import time
 
-import os
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"   # see issue #152
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+from threading import Thread, Event
 import keras as ks
+import tensorflow as tf
 import numpy as np
 import cv2 as cv
+import os
 import time
 import sys
 import socketio
+import copy
+import random
+import string
 
+event = Event()
+
+# we put some variables in the global scope so we can share the memory between threads
+mask = None
+
+steering = 90
+
+steering_offset = 0
+speed = 0
+
+subLoopExecution = 1
+
+sio = socketio.Client()
 
 import argparse
 
@@ -27,6 +44,7 @@ def parse_arguments():
     parser.add_argument('-s', '--speed', type=int, default=50, required=False, help='Car speed value from 0 to 100')
     return parser.parse_args()
 
+
 def main():
     printBanner()
 
@@ -34,11 +52,9 @@ def main():
     args = parse_arguments()
     printConfig(args)
 
-    # Load the controls window
-    imageControls()
-    carControls()
+    model = ks.models.load_model(args.neural_network_file)
 
-    sio = socketio.Client()
+   
     # we try to connect to the PiCar
     try:
         sio.connect('http://192.168.0.10:3000')
@@ -48,12 +64,54 @@ def main():
         print("Check that your laptop is connected to the PiCar network")
         exit()
 
-    # load in the model
-    model = ks.models.load_model(args.neural_network_file)
+
 
     # Run the control loop
     controlLoop(args.ip_address, sio, model)
+    print("Program Ended")
+    sys.exit()
 
+
+def captureVideo(cap, ip):
+    fps = 0
+    new_frame_time = 0
+    prev_frame_time = 0
+
+    # we create a while loop to get and display the video
+    global subLoopExecution, mask
+    while subLoopExecution:
+        
+        # we get the next frame from the video stored in frame
+        # ret is a boolean that tells us if the frame was successfully retrieved
+        # ret is short for return
+        ret, frame = cap.read()
+        # we display the frame but first lets pass it back by reference
+        # so we can use it in the main thread
+        try:
+            mask = imageProcessing(frame)
+            cv.imshow("Mask", mask)
+            fpsCounter(frame, fps)
+            cv.startWindowThread()
+            cv.imshow("PiCar Video", frame)
+            #getControls()
+        except:
+            print("Error displaying frame")
+            print("Have you connected to the PiCar?")
+            print("Is %s the correct ip address?" % ip)
+            exit()
+        # we use the waitKey function to wait for a key press
+        # if the key is q then we break out of the loop
+        if cv.waitKey(1) & 0xFF == ord('q'):
+            cv.destroyAllWindows()
+            subLoopExecution = 0
+            exit()
+            break
+
+        new_frame_time = time.time()
+        #we calculate the fps
+        fps = 1/(new_frame_time-prev_frame_time)
+        prev_frame_time = new_frame_time
+    print("Main Thread Ended")
 
 def controlLoop(ip, sio, model):
     
@@ -68,38 +126,26 @@ def controlLoop(ip, sio, model):
     print("Press 'q' to quit")
     print("----------------------------- Sending Commands ---------------------------")
 
-    fps = 0
-    new_frame_time = 0
-    prev_frame_time = 0
-    # we create a while loop to get and display the video
-    while 1:
 
-        # we get the next frame from the video stored in frame
-        # ret is a boolean that tells us if the frame was successfully retrieved
-        # ret is short for return
-        ret, frame = cap.read()
-        # we display the frame
-        try:
-            mask = imageProcessing(frame)
-            cv.imshow("Mask", mask)
-            fpsCounter(frame, fps)
-            cv.imshow("PiCar Video", frame)
-        except:
-            print("Error displaying frame")
-            print("Have you connected to the PiCar?")
-            print("Is %s the correct ip address?" % ip)
-            exit()
-        speed, steering_offset,  = getCarControls()
-        steering = predictSteering(mask, model)
-        sendCommands(speed, float(steering), sio)
-        # we use the waitKey function to wait for a key press
-        # if the key is q then we break out of the loop
-        if cv.waitKey(33) & 0xFF == ord('q'):
-            break
-        new_frame_time = time.time()
-        #we calculate the fps
-        fps = 1/(new_frame_time-prev_frame_time)
-        prev_frame_time = new_frame_time
+
+    print("Initializing threads")
+    t1 = Thread(target=sendCommands, args=(sio,), daemon=True)
+    t2 = Thread(target=predictSteering, args=(model,), daemon=True)
+    print("Starting threads")
+    t1.start()
+    t2.start()
+
+    # we start these threads after the sub threads 
+    # this is because the main thread blocks execution of the sub threads
+    # so we need the main thread active during the initialization of the sub threads
+    print("Main Thread")
+    controls()
+    captureVideo(cap, ip)
+    exit()
+    
+    
+
+    
 
 def lerp(a, b, t):
     return a + (b - a) * t
@@ -107,9 +153,14 @@ def lerp(a, b, t):
 
 
 def imageProcessing(frame):
-
-    hl, sl, vl, hu, su, vu = getImageControls()
-
+    # we get the trackbar values
+    hl = cv.getTrackbarPos('Hue Lower', 'Controls')
+    sl = cv.getTrackbarPos('Sat Lower', 'Controls')
+    vl = cv.getTrackbarPos('Val Lower', 'Controls')
+    
+    hu = cv.getTrackbarPos('Hue Upper', 'Controls')
+    su = cv.getTrackbarPos('Sat Upper', 'Controls')
+    vu = cv.getTrackbarPos('Val Upper', 'Controls')
     # we convert the frame to the HSV color space
     hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
     # blur the image to remove noise
@@ -131,51 +182,54 @@ def fpsCounter(image ,fps):
 def null(x):
     pass
 
-def imageControls():
-    # create cv2 window with 3 sliders
+def updateSpeed(x):
+    global speed
+    speed = x
+
+def controls():
+    # create cv2 window
     cv.namedWindow('Controls', cv.WINDOW_NORMAL)
     cv.resizeWindow('Controls', 300, 300)
-
     cv.createTrackbar('Hue Lower', 'Controls', 40, 255, null)
-    cv.createTrackbar('Sat Lower', 'Controls', 25, 255, null)
+    cv.createTrackbar('Sat Lower', 'Controls', 25, 255, null) 
     cv.createTrackbar('Val Lower', 'Controls', 73, 255, null)
 
     cv.createTrackbar('Hue Upper', 'Controls', 93, 255, null)
     cv.createTrackbar('Sat Upper', 'Controls', 194, 255, null)
     cv.createTrackbar('Val Upper', 'Controls', 245, 255, null)
-    
 
-def getImageControls():
-    # get the current values of the trackbars
-    hl, sl, vl, hu, su, vu = cv.getTrackbarPos('Hue Lower', 'Controls'), cv.getTrackbarPos('Sat Lower', 'Controls'), cv.getTrackbarPos('Val Lower', 'Controls'), cv.getTrackbarPos('Hue Upper', 'Controls'), cv.getTrackbarPos('Sat Upper', 'Controls'), cv.getTrackbarPos('Val Upper', 'Controls')
-    return hl, sl, vl, hu, su, vu
-
-def carControls():
-    cv.createTrackbar('Speed', 'Controls', 0, 100, null)
+    cv.createTrackbar('Speed', 'Controls', 0, 100, updateSpeed)
     cv.createTrackbar('Steering Offset', 'Controls', 90 , 180, null)
 
 
-def getCarControls():
-    speed = cv.getTrackbarPos('Speed', 'Controls')
-    steering_offset = cv.getTrackbarPos('Steering Offset', 'Controls')
-
-    return speed, steering_offset
-
-
-def sendCommands(speed, steering, sio):
-    sio.emit('drive', speed)
-    sio.emit('steer', steering)
-    sys.stdout.write("\rspeed: %s steering angle: %s  " % (speed, steering))
-    sys.stdout.flush()
+def sendCommands(sio):
+    print("Command Thread Started")
+    while subLoopExecution:
+        sio.emit('drive', speed)
+        sio.emit('steer', steering)
+        sys.stdout.write("\rspeed: %s steering angle: %s  " % (speed, steering))
+        sys.stdout.flush()
+    print("Command Thread Ended")
+    return
+    
 
 
-def predictSteering(image, model):
-    image = cv.resize(image, (100, 66))
-    image = np.array(image)
-    image = image.reshape(1, 100, 66, 1)
+def predictSteering(model):
+    global mask, steering
+    while subLoopExecution:
 
-    prediction = model(image)
-    return (prediction[0][0])
+        maskref = copy.deepcopy(mask)
+
+            # check dsize of mask
+        try:
+            maskref = cv.resize(maskref, (100, 66))
+            maskref = np.array(maskref)
+            maskref = maskref.reshape(1, 100, 66, 1)
+            steering = float(model(maskref)[0][0])
+        except:
+            continue
+
+    
 
 def printConfig(args):
     print("--------------------------------- Config ---------------------------------")
