@@ -36,6 +36,9 @@ def captureVideo(ip):
     printInfo(cap, ip)
     global mask
 
+    FPS = 1/25
+    FPS_MS = int(FPS * 1000)
+
     while 1:     
         # we get the next frame from the video stored in frame
         # ret is a boolean that tells us if the frame was successfully retrieved
@@ -55,7 +58,7 @@ def captureVideo(ip):
             exit()
         # we use the waitKey function to wait for a key press
         # if the key is q then we break out of the loop
-        if cv.waitKey(1) & 0xFF == ord('q'):
+        if cv.waitKey(FPS_MS) & 0xFF == ord('q'):
             break
 
         new_frame_time = time()
