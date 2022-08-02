@@ -1,86 +1,42 @@
-
-from ast import arg
-from operator import mod
-from time import time
-
-from threading import Thread, Event
-import keras as ks
-import tensorflow as tf
-import numpy as np
-import cv2 as cv
-import os
-import time
-import sys
-import socketio
-import copy
-import random
-import string
-
-event = Event()
-
-# we put some variables in the global scope so we can share the memory between threads
-mask = None
-
-steering = 90
-
-steering_offset = 0
-speed = 0
-
-subLoopExecution = 1
-
-sio = socketio.Client()
-
 import argparse
+import socketio
+import cv2 as cv
+import numpy as np
+import keras as ks
+from copy import deepcopy
+from time import time
+from threading import Thread
+import sys
+# we import these functions as otherwise pyinstaller fails to find them
+from keras.layers import MaxPooling2D,Conv2D,Input,Add,MaxPool2D,Flatten,AveragePooling2D,Dense,BatchNormalization,ZeroPadding2D,Activation,Concatenate,UpSampling2D
+from keras.models import Model
 
-# Parse the command line arguments below
-# - neural network file name
-# - car ip address
-# - car speed
-
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-n', '--neural_network_file', type=str, default='model.h5', required=False, help='Neural network file name')
-    parser.add_argument('-i', '--ip_address', type=str, default="192.168.0.10", required=False, help='Car ip address')
-    parser.add_argument('-s', '--speed', type=int, default=50, required=False, help='Car speed value from 0 to 100')
-    return parser.parse_args()
-
+mask = None
+sio = None
 
 def main():
     printBanner()
-
-    # Parse the command line arguments
-    args = parse_arguments()
+    args = parseArgs()
     printConfig(args)
-
-    model = ks.models.load_model(args.neural_network_file)
-
-   
-    # we try to connect to the PiCar
-    try:
-        sio.connect('http://192.168.0.10:3000')
-    # if we fail we print out an error message and exit the program
-    except:
-        print("Failed to connect to PiCar Socket Error")
-        print("Check that your laptop is connected to the PiCar network")
-        exit()
+    global sio
+    sio = tryConnect(args.ip_address)
 
 
+    predictionThread = Thread(target=predictSteering, args=(sio, args.neural_network_file,), daemon=True)
+    predictionThread.start()
 
-    # Run the control loop
-    controlLoop(args.ip_address, sio, model)
-    print("Program Ended")
-    sys.exit()
+    addControls()
+    captureVideo(args.ip_address)
 
-
-def captureVideo(cap, ip):
+def captureVideo(ip):
     fps = 0
     new_frame_time = 0
     prev_frame_time = 0
+    cap = cv.VideoCapture("http://%s:8080/?action=stream" % ip)
+    printInfo(cap, ip)
+    global mask
 
-    # we create a while loop to get and display the video
-    global subLoopExecution, mask
-    while subLoopExecution:
-        
+    while 1:     
         # we get the next frame from the video stored in frame
         # ret is a boolean that tells us if the frame was successfully retrieved
         # ret is short for return
@@ -89,11 +45,9 @@ def captureVideo(cap, ip):
         # so we can use it in the main thread
         try:
             mask = imageProcessing(frame)
-            cv.imshow("Mask", mask)
-            fpsCounter(frame, fps)
-            cv.startWindowThread()
+            cv.putText(frame, "FPS:" + str(round(fps, ndigits=2)), (50,50), cv.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255))
             cv.imshow("PiCar Video", frame)
-            #getControls()
+            cv.imshow("PiCar Mask", mask)
         except:
             print("Error displaying frame")
             print("Have you connected to the PiCar?")
@@ -102,62 +56,43 @@ def captureVideo(cap, ip):
         # we use the waitKey function to wait for a key press
         # if the key is q then we break out of the loop
         if cv.waitKey(1) & 0xFF == ord('q'):
-            cv.destroyAllWindows()
-            subLoopExecution = 0
-            exit()
             break
 
-        new_frame_time = time.time()
+        new_frame_time = time()
         #we calculate the fps
-        fps = 1/(new_frame_time-prev_frame_time)
+        fps = lerp(fps, 1/(new_frame_time-prev_frame_time), 0.05)
         prev_frame_time = new_frame_time
-    print("Main Thread Ended")
-
-def controlLoop(ip, sio, model):
     
-    cap = cv.VideoCapture("http://%s:8080/?action=stream" % ip)
-    
-    print("----------------------------- Car Information ----------------------------")
-    print("Camera FPS:", cap.get(cv.CAP_PROP_FPS))
-    print("Camera width:", cap.get(cv.CAP_PROP_FRAME_WIDTH))
-    print("Camera height:", cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-    print("--------------------------------------------------------------------------")
-    print("Capturing video from {}".format(ip))
-    print("Press 'q' to quit")
-    print("----------------------------- Sending Commands ---------------------------")
-
-
-
-    print("Initializing threads")
-    t1 = Thread(target=sendCommands, args=(sio,), daemon=True)
-    t2 = Thread(target=predictSteering, args=(model,), daemon=True)
-    print("Starting threads")
-    t1.start()
-    t2.start()
-
-    # we start these threads after the sub threads 
-    # this is because the main thread blocks execution of the sub threads
-    # so we need the main thread active during the initialization of the sub threads
-    print("Main Thread")
-    controls()
-    captureVideo(cap, ip)
-    exit()
-    
-    
-
-    
+    cv.destroyAllWindows()
 
 def lerp(a, b, t):
     return a + (b - a) * t
 
+def predictSteering(sio, model_name):
+    print("Loading Neural Network")
+    model = ks.models.load_model(model_name)
+    while 1:
 
+        maskref = deepcopy(mask)
+
+            # check dsize of mask
+        try:
+            maskref = cv.resize(maskref, (100, 66))
+            maskref = np.array(maskref)
+            maskref = maskref.reshape(1, 100, 66, 1)
+            steering = float(model(maskref)[0][0])
+            sio.emit("steer",steering)
+            sys.stdout.write("\rSent steering value: %s      " % round(steering, 2))
+            sys.stdout.flush()
+        except:
+            print("Prediction Error")
+            continue
 
 def imageProcessing(frame):
     # we get the trackbar values
     hl = cv.getTrackbarPos('Hue Lower', 'Controls')
     sl = cv.getTrackbarPos('Sat Lower', 'Controls')
     vl = cv.getTrackbarPos('Val Lower', 'Controls')
-    
     hu = cv.getTrackbarPos('Hue Upper', 'Controls')
     su = cv.getTrackbarPos('Sat Upper', 'Controls')
     vu = cv.getTrackbarPos('Val Upper', 'Controls')
@@ -175,18 +110,13 @@ def imageProcessing(frame):
 
     return blur
 
-
-def fpsCounter(image ,fps):
-    cv.putText(image, "FPS:" + str(round(fps, ndigits=2)), (50,50), cv.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255))
-
 def null(x):
     pass
 
 def updateSpeed(x):
-    global speed
-    speed = x
+    sio.emit("drive", x)
 
-def controls():
+def addControls():
     # create cv2 window
     cv.namedWindow('Controls', cv.WINDOW_NORMAL)
     cv.resizeWindow('Controls', 300, 300)
@@ -199,43 +129,41 @@ def controls():
     cv.createTrackbar('Val Upper', 'Controls', 245, 255, null)
 
     cv.createTrackbar('Speed', 'Controls', 0, 100, updateSpeed)
-    cv.createTrackbar('Steering Offset', 'Controls', 90 , 180, null)
+def printInfo(cap, ip):
+    print("----------------------------- Car Information ----------------------------")
+    print("Camera FPS:", cap.get(cv.CAP_PROP_FPS))
+    print("Camera width:", cap.get(cv.CAP_PROP_FRAME_WIDTH))
+    print("Camera height:", cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+    print("--------------------------------------------------------------------------")
+    print("Capturing video from {}".format(ip))
+    print("Press 'q' to quit")
+    print("----------------------------- Sending Commands ---------------------------")
 
+def tryConnect(ip):
+    # we try to connect to the PiCar
+    sio = socketio.Client()
+    try:
+        sio.connect('http://%s:3000' % ip)
+    # if we fail we print out an error message and exit the program
+    except:
+        print("Failed to connect to PiCar Socket Error")
+        print("Check that your laptop is connected to the PiCar network")
+        exit()
+    return sio
 
-def sendCommands(sio):
-    print("Command Thread Started")
-    while subLoopExecution:
-        sio.emit('drive', speed)
-        sio.emit('steer', steering)
-        sys.stdout.write("\rspeed: %s steering angle: %s  " % (speed, steering))
-        sys.stdout.flush()
-    print("Command Thread Ended")
-    return
-    
-
-
-def predictSteering(model):
-    global mask, steering
-    while subLoopExecution:
-
-        maskref = copy.deepcopy(mask)
-
-            # check dsize of mask
-        try:
-            maskref = cv.resize(maskref, (100, 66))
-            maskref = np.array(maskref)
-            maskref = maskref.reshape(1, 100, 66, 1)
-            steering = float(model(maskref)[0][0])
-        except:
-            continue
-
-    
+def parseArgs():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-n', '--neural_network_file', type=str, default='model.h5', required=False, help='Neural network file name')
+    parser.add_argument('-i', '--ip_address', type=str, default="192.168.0.10", required=False, help='Car ip address')
+    parser.add_argument('-s', '--speed', type=int, default=50, required=False, help='Car speed value from 0 to 100')
+    return parser.parse_args()
 
 def printConfig(args):
     print("--------------------------------- Config ---------------------------------")
     print("Neural network file name: {}".format(args.neural_network_file))
     print("Car ip address: {}".format(args.ip_address))
     print("Car speed: {}".format(args.speed))
+    print("--------------------------------------------------------------------------")
 
 def printBanner():
     # print raw string

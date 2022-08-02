@@ -1,1 +1,7 @@
 *h5
+.vscode/
+dist/
+build/
+*.spec
+__pycache__/
+.DS_STORE
