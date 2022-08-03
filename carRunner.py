@@ -13,6 +13,7 @@ from keras.models import Model
 
 mask = None
 sio = None
+steering = 90
 
 def main():
     printBanner()
@@ -65,6 +66,7 @@ def captureVideo(ip):
         #we calculate the fps
         fps = lerp(fps, 1/(new_frame_time-prev_frame_time), 0.05)
         prev_frame_time = new_frame_time
+        sio.emit("steer", steering)
     
     cv.destroyAllWindows()
 
@@ -72,6 +74,7 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 def predictSteering(sio, model_name):
+    global steering
     print("Loading Neural Network")
     model = ks.models.load_model(model_name)
     while 1:
@@ -84,7 +87,6 @@ def predictSteering(sio, model_name):
             maskref = np.array(maskref)
             maskref = maskref.reshape(1, 100, 66, 1)
             steering = float(model(maskref)[0][0])
-            sio.emit("steer",steering)
             sys.stdout.write("\rSent steering value: %s      " % round(steering, 2))
             sys.stdout.flush()
         except:
