@@ -5,3 +5,5 @@ build/
 *.spec
 __pycache__/
 .DS_STORE
+carRunner.build/
+carRunner.dist/

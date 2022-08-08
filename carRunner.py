@@ -85,11 +85,14 @@ def predictSteering(sio, model_name):
         try:
             maskref = cv.resize(maskref, (100, 66))
             maskref = np.array(maskref)
-            maskref = maskref.reshape(1, 100, 66, 1)
+            maskref = np.expand_dims(maskref, axis=2)
+            maskref = np.expand_dims(maskref, axis=0)
             steering = float(model(maskref)[0][0])
             sys.stdout.write("\rSent steering value: %s      " % round(steering, 2))
             sys.stdout.flush()
         except:
+            # print the exeption 
+            print(sys.exc_info()[0])
             print("Prediction Error")
             continue
 
