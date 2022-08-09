@@ -7,9 +7,8 @@ from copy import deepcopy
 from time import time
 from threading import Thread
 import sys
-# we import these functions as otherwise pyinstaller fails to find them
-from keras.layers import MaxPooling2D,Conv2D,Input,Add,MaxPool2D,Flatten,AveragePooling2D,Dense,BatchNormalization,ZeroPadding2D,Activation,Concatenate,UpSampling2D
-from keras.models import Model
+
+import urllib 
 
 mask = None
 sio = None
@@ -33,42 +32,38 @@ def captureVideo(ip):
     fps = 0
     new_frame_time = 0
     prev_frame_time = 0
-    cap = cv.VideoCapture("http://%s:8080/?action=stream" % ip)
-    printInfo(cap, ip)
-    global mask
+    global mask 
+    try:
+        stream = urllib.request.urlopen('http://192.168.0.10:8080/stream')
+    except:
+        print("Error displaying frame")
+        print("Have you connected to the PiCar?")
+        print("Is %s the correct ip address?" % ip)
+        exit()
 
-    FPS = 1/25
-    FPS_MS = int(FPS * 1000)
+    bytes = b''
 
     while 1:     
-        # we get the next frame from the video stored in frame
-        # ret is a boolean that tells us if the frame was successfully retrieved
-        # ret is short for return
-        ret, frame = cap.read()
-        # we display the frame but first lets pass it back by reference
-        # so we can use it in the main thread
-        try:
+        bytes += stream.read(1024)
+        a = bytes.find(b'\xff\xd8')
+        b = bytes.find(b'\xff\xd9')
+        if a != -1 and b != -1:
+            jpg = bytes[a:b+2]
+            bytes = bytes[b+2:]
+            frame = cv.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv.IMREAD_COLOR)
             mask = imageProcessing(frame)
             cv.putText(frame, "FPS:" + str(round(fps, ndigits=2)), (50,50), cv.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255))
             cv.imshow("PiCar Video", frame)
             cv.imshow("PiCar Mask", mask)
-        except:
-            print("Error displaying frame")
-            print("Have you connected to the PiCar?")
-            print("Is %s the correct ip address?" % ip)
-            exit()
-        # we use the waitKey function to wait for a key press
-        # if the key is q then we break out of the loop
-        if cv.waitKey(FPS_MS) & 0xFF == ord('q'):
-            break
+            sio.emit("steer", steering)
+            if cv.waitKey(1) == 27:
+                exit(0) 
 
         new_frame_time = time()
         #we calculate the fps
-        fps = lerp(fps, 1/(new_frame_time-prev_frame_time), 0.05)
+        fps = lerp(fps, 1/(new_frame_time - prev_frame_time), 0.1)
         prev_frame_time = new_frame_time
-        sio.emit("steer", steering)
-    
-    cv.destroyAllWindows()
+        
 
 def lerp(a, b, t):
     return a + (b - a) * t
@@ -186,4 +181,3 @@ def printBanner():
 
 if __name__ == '__main__':
     main()
-  
