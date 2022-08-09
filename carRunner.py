@@ -30,8 +30,8 @@ def main():
 
 def captureVideo(ip):
     fps = 0
-    new_frame_time = 0
-    prev_frame_time = 0
+    new_frame_time = 2
+    prev_frame_time = 1
     global mask 
     try:
         stream = urllib.request.urlopen('http://192.168.0.10:8080/stream')
@@ -44,6 +44,7 @@ def captureVideo(ip):
     bytes = b''
 
     while 1:     
+        new_frame_time = time()
         bytes += stream.read(1024)
         a = bytes.find(b'\xff\xd8')
         b = bytes.find(b'\xff\xd9')
@@ -59,11 +60,16 @@ def captureVideo(ip):
             if cv.waitKey(1) == 27:
                 exit(0) 
 
-        new_frame_time = time()
+        
         #we calculate the fps
-        fps = lerp(fps, 1/(new_frame_time - prev_frame_time), 0.1)
+        fps = lerp(fps, safe_div(1,(new_frame_time - prev_frame_time)), 0.001)
         prev_frame_time = new_frame_time
         
+
+def safe_div(x,y):
+    if y==0: return 0
+    return x/y
+
 
 def lerp(a, b, t):
     return a + (b - a) * t
